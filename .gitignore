@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# image folders
+sources/
+results/

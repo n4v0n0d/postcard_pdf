@@ -1,8 +1,10 @@
 import numpy as np
 
+from io import BytesIO
+from itertools import batched
 from pathlib import Path
 from PIL import Image
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter, Transformation
 
 SOURCE_FOLDER = Path('sources')
 RESULTS_FOLDER = Path('results')
@@ -11,14 +13,29 @@ PAD_COLOR = (0, 0, 0, 0)
 CUT_LINES_COLOR = (255, 0, 0, 255)
 
 DPI = 300
-BLEED_SIZE = 50
-CUT_LINE_LENGTH = 300
 
+def inch_to_pixel(inches):
+    # Also make it an even number
+    return int((inches * DPI) / 2) * 2
+
+BLEED_SIZE = inch_to_pixel(0.10)
+CUT_LINE_LENGTH = inch_to_pixel(1)
+
+# offset cut lines 2 px away from bleed
 CUT_LINE_OFFSET = 2
+
+TARGET_WIDTH = inch_to_pixel(8.5)
+TARGET_HEIGHT = inch_to_pixel(11)
+TARGET_SIZE = (TARGET_WIDTH, TARGET_HEIGHT)
 
 
 def get_image(name) -> Image:
     return Image.open(SOURCE_FOLDER / name)
+
+
+def get_images():
+    for path in SOURCE_FOLDER.iterdir:
+        yield Image.open(path)
 
 
 def save_to_results(image: Image, name):
@@ -40,9 +57,6 @@ def single_pixel_smear(arr: np.array, size):
 
 
 def add_corner_bleed(image, bled_image, image_array, bleed_size) -> Image:
-    if bleed_size % 2 != 0:
-        raise ValueError(f'bleed_size has to be a multiple of 2, got {bleed_size}')
-
     half_bleed = int(bleed_size / 2)
     width, height = image.size
 
@@ -51,9 +65,9 @@ def add_corner_bleed(image, bled_image, image_array, bleed_size) -> Image:
     bottom_left = single_pixel_smear(image_array[-1, 0, :], half_bleed)
     bottom_right = single_pixel_smear(image_array[-1, -1, :], half_bleed)
 
-    bled_image.paste(Image.fromarray(top_left), (half_bleed, half_bleed))
-    bled_image.paste(Image.fromarray(top_right), (width + bleed_size, half_bleed))
-    bled_image.paste(Image.fromarray(bottom_left), (half_bleed, height + bleed_size))
+    bled_image.paste(Image.fromarray(top_left), (bleed_size - half_bleed, bleed_size - half_bleed))
+    bled_image.paste(Image.fromarray(top_right), (width + bleed_size, bleed_size - half_bleed))
+    bled_image.paste(Image.fromarray(bottom_left), (bleed_size - half_bleed, height + bleed_size))
     bled_image.paste(Image.fromarray(bottom_right), (width + bleed_size, height + bleed_size))
 
     return bled_image
@@ -194,16 +208,64 @@ def bleed_stack_cut(image_1, image_2, bleed_size, rotator) -> Image:
     )
 
     return result
-    
+
+
+def resize_centered(image: Image, target_size) -> Image:
+    result = Image.new('RGBA', target_size, PAD_COLOR)
+    paste_x = int((image.size[0] - target_size[0]) / 2)
+    paste_y = int((image.size[1] - target_size[1]) / 2)
+    breakpoint()
+    result.paste(image, (paste_x, paste_y))
+    return result
+
+
+def process_images():
+    # Assume an even number of images for now.
+    for i, (path_1, path_2) in enumerate(batched(sorted(SOURCE_FOLDER.iterdir()), 2)):
+        print(f'Processing batch {i}')
+        image_1 = Image.open(path_1)
+        image_2 = Image.open(path_2)
+
+        for tater_name, rotater in taters:
+            bsc_image = bleed_stack_cut(image_1, image_2, BLEED_SIZE, rotater)
+            # bsc_image = resize_centered(bsc_image, TARGET_SIZE)
+            crop_topleft_coord = (int((bsc_image.size[0] - TARGET_WIDTH) / 2), int((bsc_image.size[1] - TARGET_HEIGHT) / 2))
+            crop_bottomright_coord = crop_topleft_coord[0] + TARGET_WIDTH, crop_topleft_coord[1] + TARGET_HEIGHT
+            cropped = bsc_image.crop((*crop_topleft_coord, *crop_bottomright_coord))
+            save_to_results(cropped, f'{path_1.name}__{path_2.name}__{tater_name}.png')
+
+
+def images_to_pdf(image_matcher, pdf_id):
+    pdf_name = f'postcards_{pdf_id}.pdf'
+    print(f'Creating {pdf_name}')
+    writer = PdfWriter()
+    for path in sorted(RESULTS_FOLDER.iterdir()):
+        if path.suffix != '.png':
+            continue
+
+        if not image_matcher(path):
+            continue
+
+        print(f'Adding {path}')
+        image = Image.open(path)
+        image_bytes = BytesIO()
+        image.save(image_bytes, "pdf")
+        image_pdf_reader = PdfReader(image_bytes)
+        image_page = image_pdf_reader.pages[0]
+        writer.add_page(image_page)
+
+    with open(RESULTS_FOLDER / pdf_name, 'wb') as f:
+        writer.write(f)
+
 
 def main():
-    name1 = Path('table_6_howl.png')
-    name2 = Path('table_8_dune.png')
-    result = bleed_stack_cut(get_image(name1), get_image(name2), BLEED_SIZE, rotate_left)
-    save_to_results(result, f'{name1.name}__{name2.name}.png')
+    process_images()
+    images_to_pdf(lambda x: str(x).endswith('left.png'), 'left')
+    images_to_pdf(lambda x: True, 'left_right')
 
 
 add_bleed = add_bleed_flip
+taters = [('left', rotate_left), ('right', rotate_right)]
 
 if __name__ == "__main__":
     main()
